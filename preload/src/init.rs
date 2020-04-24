@@ -6,6 +6,9 @@ use crate::logger;
 use crate::opt;
 use crate::utils::generate_filename;
 
+static SIGNALWAIT_THREAD_HANDLE: SpinLock<Option<std::thread::JoinHandle<()>>> =
+    SpinLock::new(None);
+
 fn initialize_logger() {
     static mut SYSCALL_LOGGER: logger::SyscallLogger = logger::SyscallLogger::empty();
     static mut FILE_LOGGER: logger::FileLogger = logger::FileLogger::empty();
@@ -71,7 +74,9 @@ fn initialize_signal_handlers() {
     }
     sigset.thread_block().expect("Register signal failed!");
 
-    thread::Builder::new()
+    let mut thread_handle = SIGNALWAIT_THREAD_HANDLE.lock();
+    static SIG_THREAD_RUNNING: AtomicBool = AtomicBool::new(false);
+    let new_handle = thread::Builder::new()
         .name("Sigwait".into())
         .spawn(move || loop {
             match sigset.wait() {
@@ -92,6 +97,12 @@ fn initialize_signal_handlers() {
             }
         })
         .expect("Failed to start Sigwait thread");
+
+    while SIG_THREAD_RUNNING.load(Ordering::SeqCst) == false {
+        thread::yield_now();
+    }
+
+    *thread_handle = Some(new_handle);
 }
 
 pub fn startup() {
@@ -103,11 +114,12 @@ pub fn startup() {
     }
 
     initialize_atexit_hook();
+
+    initialize_signal_handlers();
+
     if !opt::get().disabled_by_default {
         crate::global::toggle();
     }
-
-    initialize_signal_handlers();
 
     env::remove_var("LD_PRELOAD");
     info!("Startup initialization finished");
